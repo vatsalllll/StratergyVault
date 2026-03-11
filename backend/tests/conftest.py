@@ -13,6 +13,15 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 
+# ─── Auto-initialize DB for tests that use the real app ──────────
+
+@pytest.fixture(autouse=True, scope="session")
+def _init_test_database():
+    """Ensure the SQLite database tables exist before any test runs."""
+    from src.core.db import init_db
+    init_db()
+
+
 # ─── Sample Data Fixtures ───────────────────────────────────────
 
 @pytest.fixture

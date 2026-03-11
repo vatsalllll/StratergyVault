@@ -54,6 +54,10 @@ class Strategy(Base):
     win_rate = Column(Float)
     num_trades = Column(Integer)
     
+    # Equity curve and trade log from backtest
+    equity_curve = Column(JSON)   # List of equity values from backtest
+    trade_log = Column(JSON)      # List of trade records
+    
     # Validation metrics
     walk_forward_score = Column(Float)
     is_robust = Column(Boolean, default=False)

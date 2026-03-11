@@ -105,6 +105,7 @@ class BacktestResult:
     execution_time: float
     strategy_name: str
     data_source: str
+    equity_curve: Optional[List[float]] = None
 
 
 def parse_backtest_output(stdout: str) -> Dict[str, Any]:

@@ -236,67 +236,90 @@ async def get_strategy_performance(strategy_id: int, db: Session = Depends(get_d
     """
     Get performance chart data for a strategy — equity curve, monthly returns,
     and drawdown series. Does NOT reveal strategy code.
-    Uses the strategy's real metrics to generate a realistic simulated curve.
+    
+    Returns real equity curve data if available from backtest,
+    otherwise generates a simulated curve from stored metrics.
     """
     import numpy as np
-    import hashlib
 
     strategy = db.query(Strategy).filter(Strategy.id == strategy_id).first()
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
 
-    # Seed RNG deterministically based on strategy ID + name
-    seed_str = f"{strategy.id}-{strategy.name}"
-    seed = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16) % (2**31)
-    rng = np.random.RandomState(seed)
+    # ── Try real equity curve first ────────────────────────────────
+    if strategy.equity_curve and len(strategy.equity_curve) > 10:
+        equity = strategy.equity_curve
+        equity_arr = np.array(equity)
+        
+        # Calculate drawdown from real equity
+        running_max = np.maximum.accumulate(equity_arr)
+        drawdown_series = ((equity_arr - running_max) / running_max * 100).tolist()
+        
+        # Calculate daily returns for monthly aggregation
+        daily_returns = np.diff(equity_arr) / equity_arr[:-1]
+        
+        # Monthly returns (group every 21 days)
+        monthly_returns = []
+        for i in range(0, len(daily_returns), 21):
+            chunk = daily_returns[i:i + 21]
+            monthly_ret = float(np.prod(1 + chunk) - 1) * 100
+            monthly_returns.append(round(monthly_ret, 2))
+        
+        # Generate month labels
+        month_labels = _generate_month_labels(len(monthly_returns))
+        
+        # Sample for payload size
+        step = max(1, len(equity) // 200)
+        sampled_equity = [round(equity[i], 2) for i in range(0, len(equity), step)]
+        sampled_dd = [round(drawdown_series[i], 2) for i in range(0, len(drawdown_series), step)]
+        
+        data_source = "real_backtest"
+    else:
+        # ── Fallback: simulated curve from stored metrics ──────────
+        import hashlib
+        
+        seed_str = f"{strategy.id}-{strategy.name}"
+        seed = int(hashlib.md5(seed_str.encode()).hexdigest()[:8], 16) % (2**31)
+        rng = np.random.RandomState(seed)
 
-    # Parameters from stored metrics
-    total_return = (strategy.return_pct or 15) / 100  # e.g. 0.38
-    sharpe = strategy.sharpe_ratio or 1.0
-    max_dd = abs(strategy.max_drawdown_pct or 15) / 100  # e.g. 0.13
-    n_days = 504  # ~2 years of trading days
+        total_return = (strategy.return_pct or 15) / 100
+        sharpe = strategy.sharpe_ratio or 1.0
+        max_dd = abs(strategy.max_drawdown_pct or 15) / 100
+        n_days = 504
 
-    # Generate daily returns that approximate the strategy's actual metrics
-    daily_mean = total_return / n_days
-    daily_vol = (daily_mean * np.sqrt(252) / max(sharpe, 0.3))
-    daily_returns = rng.normal(daily_mean, daily_vol, n_days)
+        daily_mean = total_return / n_days
+        daily_vol = (daily_mean * np.sqrt(252) / max(sharpe, 0.3))
+        daily_returns = rng.normal(daily_mean, daily_vol, n_days)
 
-    # Add a drawdown event in the middle
-    dd_start = n_days // 3
-    dd_length = 30
-    daily_returns[dd_start:dd_start + dd_length] -= max_dd / dd_length * 1.5
+        dd_start = n_days // 3
+        dd_length = 30
+        daily_returns[dd_start:dd_start + dd_length] -= max_dd / dd_length * 1.5
 
-    # Build equity curve
-    equity = [10000.0]
-    for r in daily_returns:
-        equity.append(equity[-1] * (1 + r))
-    equity = equity[1:]  # remove initial
+        equity = [10000.0]
+        for r in daily_returns:
+            equity.append(equity[-1] * (1 + r))
+        equity = equity[1:]
 
-    # Running max and drawdown series
-    running_max = np.maximum.accumulate(equity)
-    drawdown_series = (np.array(equity) - running_max) / running_max * 100
+        running_max = np.maximum.accumulate(equity)
+        drawdown_series = ((np.array(equity) - running_max) / running_max * 100).tolist()
 
-    # Monthly returns (group every 21 days)
-    monthly_returns = []
-    month_labels = [
-        "Jan'24", "Feb'24", "Mar'24", "Apr'24", "May'24", "Jun'24",
-        "Jul'24", "Aug'24", "Sep'24", "Oct'24", "Nov'24", "Dec'24",
-        "Jan'25", "Feb'25", "Mar'25", "Apr'25", "May'25", "Jun'25",
-        "Jul'25", "Aug'25", "Sep'25", "Oct'25", "Nov'25", "Dec'25",
-    ]
-    for i in range(0, n_days, 21):
-        chunk = daily_returns[i:i + 21]
-        monthly_ret = float(np.prod(1 + chunk) - 1) * 100
-        monthly_returns.append(round(monthly_ret, 2))
-    month_labels = month_labels[:len(monthly_returns)]
+        monthly_returns = []
+        for i in range(0, n_days, 21):
+            chunk = daily_returns[i:i + 21]
+            monthly_ret = float(np.prod(1 + chunk) - 1) * 100
+            monthly_returns.append(round(monthly_ret, 2))
 
-    # Sample every 5th point to keep payload small
-    sampled_equity = [round(equity[i], 2) for i in range(0, len(equity), 5)]
-    sampled_dd = [round(drawdown_series[i], 2) for i in range(0, len(drawdown_series), 5)]
+        month_labels = _generate_month_labels(len(monthly_returns))
+
+        sampled_equity = [round(equity[i], 2) for i in range(0, len(equity), 5)]
+        sampled_dd = [round(drawdown_series[i], 2) for i in range(0, len(drawdown_series), 5)]
+        
+        data_source = "simulated"
 
     return {
         "id": strategy.id,
         "name": strategy.name,
+        "data_source": data_source,
         "equity_curve": sampled_equity,
         "drawdown_series": sampled_dd,
         "monthly_returns": monthly_returns,
@@ -315,6 +338,19 @@ async def get_strategy_performance(strategy_id: int, db: Session = Depends(get_d
             "tier": strategy.tier.value if strategy.tier else None,
         },
     }
+
+
+def _generate_month_labels(count: int) -> list:
+    """Generate month labels for chart display."""
+    labels = []
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    year = 24
+    for i in range(count):
+        m = i % 12
+        y = year + i // 12
+        labels.append(f"{months[m]}'{y}")
+    return labels
 
 
 @router.get("/{strategy_id}/detail")
