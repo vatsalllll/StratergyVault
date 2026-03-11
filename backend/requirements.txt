@@ -16,6 +16,8 @@ pandas==2.2.0
 numpy==1.26.3
 ta==0.11.0
 backtesting==0.3.3
+pyarrow>=14.0
+curl_cffi>=0.5.7
 
 # Database
 sqlalchemy==2.0.25
