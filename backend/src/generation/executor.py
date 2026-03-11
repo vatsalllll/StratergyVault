@@ -3,6 +3,7 @@ StrategyVault - Backtest Executor
 Runs backtesting.py strategies and captures results
 
 Provides:
+- Code sanitization (blocks dangerous patterns)
 - Safe strategy code execution
 - Result parsing (Sharpe, returns, drawdown, etc.)
 - Parallel execution support
@@ -14,10 +15,78 @@ import re
 import os
 import tempfile
 from pathlib import Path
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+# ── Code Sanitization ──────────────────────────────────────────────
+
+# Imports that are ALLOWED in strategy code
+ALLOWED_IMPORTS = {
+    "pandas", "pd", "numpy", "np", "talib", "ta",
+    "backtesting", "Backtest", "Strategy",
+    "math", "statistics", "collections", "functools",
+    "datetime", "dateutil",
+}
+
+# Patterns that are BLOCKED — these indicate dangerous code
+DANGEROUS_PATTERNS = [
+    # System execution
+    (r'\bos\.system\b', "os.system() calls are not allowed"),
+    (r'\bos\.popen\b', "os.popen() calls are not allowed"),
+    (r'\bsubprocess\b', "subprocess module is not allowed"),
+    (r'\bos\.exec', "os.exec*() calls are not allowed"),
+    
+    # Code injection
+    (r'\beval\s*\(', "eval() calls are not allowed"),
+    (r'\bexec\s*\(', "exec() calls are not allowed"),
+    (r'\b__import__\s*\(', "__import__() calls are not allowed"),
+    (r'\bcompile\s*\(', "compile() calls are not allowed"),
+    
+    # Network access
+    (r'\bsocket\b', "socket module is not allowed"),
+    (r'\brequests\b', "requests module is not allowed"),
+    (r'\burllib\b', "urllib module is not allowed"),
+    (r'\bhttpx\b', "httpx module is not allowed"),
+    (r'\baiohttp\b', "aiohttp module is not allowed"),
+    
+    # File system access (except read for data loading)
+    (r'\bos\.remove\b', "os.remove() is not allowed"),
+    (r'\bos\.unlink\b', "os.unlink() is not allowed"),
+    (r'\bshutil\b', "shutil module is not allowed"),
+    (r'\bos\.rmdir\b', "os.rmdir() is not allowed"),
+    (r'\bos\.makedirs\b', "os.makedirs() is not allowed"),
+    (r'\bos\.mkdir\b', "os.mkdir() is not allowed"),
+    (r'\bos\.rename\b', "os.rename() is not allowed"),
+    
+    # Dangerous builtins
+    (r'\bglobals\s*\(\s*\)', "globals() calls are not allowed"),
+    (r'\bsetattr\s*\(', "setattr() calls are not allowed"),
+    (r'\bdelattr\s*\(', "delattr() calls are not allowed"),
+    
+    # Pickle (arbitrary code execution via deserialization)
+    (r'\bpickle\b', "pickle module is not allowed"),
+    (r'\bcPickle\b', "cPickle module is not allowed"),
+]
+
+
+def sanitize_code(code: str) -> Tuple[bool, str]:
+    """
+    Check strategy code for dangerous patterns.
+    
+    Args:
+        code: Python strategy code to validate
+        
+    Returns:
+        Tuple of (is_safe, error_message). is_safe is True if code passes.
+    """
+    for pattern, message in DANGEROUS_PATTERNS:
+        if re.search(pattern, code):
+            return False, f"Code sanitization failed: {message}"
+    
+    return True, ""
 
 
 @dataclass
@@ -104,6 +173,25 @@ def execute_backtest(
     Returns:
         BacktestResult with execution results
     """
+    # ── Sanitize code before execution ──────────────────────────────
+    is_safe, error_msg = sanitize_code(code)
+    if not is_safe:
+        return BacktestResult(
+            success=False,
+            return_pct=None,
+            buy_hold_pct=None,
+            sharpe_ratio=None,
+            sortino_ratio=None,
+            max_drawdown_pct=None,
+            num_trades=None,
+            win_rate=None,
+            stdout="",
+            stderr=error_msg,
+            execution_time=0,
+            strategy_name=strategy_name,
+            data_source=os.path.basename(data_path) if data_path else "unknown"
+        )
+
     # Replace data path placeholder in code
     code = code.replace("DATA_PATH = ", f'DATA_PATH = "{data_path}"  # ')
     code = code.replace('path/to/your/data.csv', data_path)
