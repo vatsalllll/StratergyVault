@@ -11,7 +11,7 @@ Key changes from initial version:
 import os
 import tempfile
 import traceback
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -274,6 +274,7 @@ def run_pipeline(
             max_drawdown_pct=max_drawdown_pct,
             win_rate=win_rate,
             num_trades=num_trades,
+            equity_curve=equity_curve_data,
             walk_forward_score=walk_forward_score,
             is_robust=is_robust,
             consensus_vote="PENDING" if backtest_succeeded else "REJECTED",
@@ -303,3 +304,103 @@ def run_pipeline(
         status["error"] = f"Failed to save: {str(e)}"
 
     return status
+
+
+def run_multi_asset_backtest(
+    strategy_code: str,
+    strategy_name: str,
+    assets: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    Test a strategy across multiple assets and return aggregated results.
+    
+    Uses DEFAULT_BACKTEST_ASSETS from config if no assets provided.
+    This is based on the multi-asset approach from Moon Dev's RBI agent.
+    
+    Args:
+        strategy_code: Strategy Python code
+        strategy_name: Name of the strategy
+        assets: Optional list of asset symbols to test
+        
+    Returns:
+        Dictionary with per-asset results, best asset, and aggregated stats
+    """
+    from src.generation.executor import execute_backtest, aggregate_results
+
+    target_assets = assets or settings.DEFAULT_BACKTEST_ASSETS
+    results = []
+    per_asset = {}
+
+    for symbol in target_assets:
+        try:
+            df = fetch_ohlcv(symbol, period="2y")
+            if df is None or df.empty:
+                per_asset[symbol] = {"status": "no_data"}
+                continue
+
+            # Save to temp CSV
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".csv", delete=False, prefix=f"sv_{symbol}_"
+            )
+            export_df = df.copy()
+            if hasattr(export_df.columns, "get_level_values"):
+                try:
+                    export_df.columns = export_df.columns.get_level_values(0)
+                except Exception:
+                    pass
+            export_df.index.name = "datetime"
+            export_df.to_csv(tmp.name)
+
+            bt_result = execute_backtest(
+                code=strategy_code,
+                data_path=tmp.name,
+                strategy_name=strategy_name,
+                timeout=120,
+            )
+            results.append(bt_result)
+
+            if bt_result.success and bt_result.return_pct is not None:
+                per_asset[symbol] = {
+                    "status": "success",
+                    "return_pct": bt_result.return_pct,
+                    "sharpe_ratio": bt_result.sharpe_ratio,
+                    "max_drawdown_pct": bt_result.max_drawdown_pct,
+                }
+            else:
+                per_asset[symbol] = {
+                    "status": "failed",
+                    "error": (bt_result.stderr or "")[:100],
+                }
+
+            # Clean up temp file
+            try:
+                os.unlink(tmp.name)
+            except Exception:
+                pass
+
+        except Exception as e:
+            per_asset[symbol] = {"status": "error", "error": str(e)[:100]}
+
+    # Aggregate results
+    aggregated = aggregate_results(results) if results else {
+        "total_tests": 0,
+        "successful_tests": 0,
+        "avg_return": None,
+        "best_return": None,
+    }
+
+    # Identify best asset
+    best_asset = None
+    best_return = float("-inf")
+    for symbol, data in per_asset.items():
+        if data.get("status") == "success" and data.get("return_pct", float("-inf")) > best_return:
+            best_return = data["return_pct"]
+            best_asset = symbol
+
+    return {
+        "per_asset": per_asset,
+        "aggregated": aggregated,
+        "best_asset": best_asset,
+        "best_return": best_return if best_asset else None,
+        "assets_tested": list(per_asset.keys()),
+    }
