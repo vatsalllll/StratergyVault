@@ -97,45 +97,89 @@ def run_pipeline(
     except Exception as e:
         status["steps"].append({"step": "data_fetch", "status": "failed", "error": str(e)})
 
-    # ── Step 3: Run backtest ───────────────────────────────────────
+    # ── Step 3: RBI Debug Loop — backtest with iterative debugging ──
     return_pct = None
     sharpe_ratio = None
     max_drawdown_pct = None
     win_rate = None
     num_trades = None
     backtest_succeeded = False
+    equity_curve_data = None
 
     if strategy_code and data_path:
-        try:
-            from src.generation.executor import execute_backtest
+        from src.generation.executor import execute_backtest
 
-            bt_result = execute_backtest(
-                code=strategy_code,
-                data_path=data_path,
-                strategy_name=strategy_name,
-                timeout=120,
-            )
-            if bt_result.success and bt_result.return_pct is not None:
-                return_pct = bt_result.return_pct
-                sharpe_ratio = bt_result.sharpe_ratio
-                max_drawdown_pct = bt_result.max_drawdown_pct
-                win_rate = bt_result.win_rate
-                num_trades = bt_result.num_trades
-                backtest_succeeded = True
-                status["steps"].append({
-                    "step": "backtest",
-                    "status": "success",
-                    "return_pct": return_pct,
-                    "sharpe_ratio": sharpe_ratio,
-                })
-            else:
-                status["steps"].append({
-                    "step": "backtest",
-                    "status": "failed",
-                    "error": bt_result.stderr[:200] if bt_result.stderr else "Unknown error",
-                })
-        except Exception as e:
-            status["steps"].append({"step": "backtest", "status": "error", "error": str(e)})
+        # Package check first (fix backtesting.lib imports)
+        try:
+            from src.generation.generator import StrategyGenerator, AIModel
+            generator = StrategyGenerator(AIModel.GEMINI_FLASH)
+            strategy_code = generator.package_check(strategy_code)
+            status["steps"].append({"step": "package_check", "status": "success"})
+        except Exception:
+            pass  # package_check is optional, proceed anyway
+
+        max_debug_attempts = settings.MAX_DEBUG_ITERATIONS
+        for attempt in range(max_debug_attempts + 1):
+            try:
+                bt_result = execute_backtest(
+                    code=strategy_code,
+                    data_path=data_path,
+                    strategy_name=strategy_name,
+                    timeout=120,
+                )
+                if bt_result.success and bt_result.return_pct is not None:
+                    return_pct = bt_result.return_pct
+                    sharpe_ratio = bt_result.sharpe_ratio
+                    max_drawdown_pct = bt_result.max_drawdown_pct
+                    win_rate = bt_result.win_rate
+                    num_trades = bt_result.num_trades
+                    equity_curve_data = bt_result.equity_curve
+                    backtest_succeeded = True
+                    status["steps"].append({
+                        "step": "backtest",
+                        "status": "success",
+                        "return_pct": return_pct,
+                        "sharpe_ratio": sharpe_ratio,
+                        "attempt": attempt + 1,
+                    })
+                    break  # Success — exit the debug loop
+                else:
+                    # Backtest failed — try AI debug if we have attempts left
+                    error_msg = bt_result.stderr[:500] if bt_result.stderr else "Unknown error"
+                    if attempt < max_debug_attempts:
+                        try:
+                            strategy_code = generator.debug_strategy(strategy_code, error_msg)
+                            strategy_code = generator.package_check(strategy_code)
+                            status["steps"].append({
+                                "step": "debug_iteration",
+                                "status": "retrying",
+                                "attempt": attempt + 1,
+                                "error": error_msg[:100],
+                            })
+                        except Exception as debug_err:
+                            status["steps"].append({
+                                "step": "debug_iteration",
+                                "status": "debug_failed",
+                                "attempt": attempt + 1,
+                                "error": str(debug_err)[:100],
+                            })
+                            break  # Can't debug, give up
+                    else:
+                        status["steps"].append({
+                            "step": "backtest",
+                            "status": "failed",
+                            "error": error_msg[:200],
+                            "attempts": attempt + 1,
+                        })
+            except Exception as e:
+                if attempt >= max_debug_attempts:
+                    status["steps"].append({
+                        "step": "backtest",
+                        "status": "error",
+                        "error": str(e)[:200],
+                        "attempts": attempt + 1,
+                    })
+                    break
     else:
         status["steps"].append({
             "step": "backtest",

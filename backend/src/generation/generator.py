@@ -275,6 +275,52 @@ class StrategyGenerator:
         
         return '\n'.join(code_lines) if code_lines else text
 
+    def package_check(self, code: str) -> str:
+        """
+        Fix package imports in strategy code (ported from Moon Dev RBI Agent).
+        
+        Ensures the code doesn't use backtesting.lib imports and uses
+        talib/pandas-ta instead. This is the most common cause of backtest
+        failures.
+        
+        Args:
+            code: Strategy code to fix
+            
+        Returns:
+            Fixed strategy code
+        """
+        # Quick fix without AI — replace common problematic imports
+        fixes = [
+            ("from backtesting.lib import crossover", ""),
+            ("from backtesting.lib import *", ""),
+            ("import backtesting.lib", ""),
+        ]
+        
+        fixed_code = code
+        for old, new in fixes:
+            fixed_code = fixed_code.replace(old, new)
+        
+        # Replace crossover function calls with manual implementation
+        if "crossover(" in fixed_code:
+            # Add a helper function at the top of the code
+            crossover_helper = '''
+def crossover(series_a, series_b):
+    """Check if series_a crossed above series_b."""
+    return series_a[-2] < series_b[-2] and series_a[-1] > series_b[-1]
+
+'''
+            # Insert after imports
+            import_end = 0
+            for i, line in enumerate(fixed_code.split('\n')):
+                if line.strip().startswith(('import ', 'from ')):
+                    import_end = i + 1
+            
+            lines = fixed_code.split('\n')
+            lines.insert(import_end, crossover_helper)
+            fixed_code = '\n'.join(lines)
+        
+        return fixed_code
+
 
 def generate_backtest_template(strategy_name: str) -> str:
     """
