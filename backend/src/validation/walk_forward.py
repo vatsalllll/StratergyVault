@@ -275,6 +275,91 @@ def generate_validation_report(result: WalkForwardResult) -> str:
     return "\n".join(report)
 
 
+def quick_walk_forward(
+    data: pd.DataFrame,
+    train_months: int = 6,
+    test_months: int = 3,
+    step_months: int = 3,
+    min_robustness_score: float = 0.5,
+) -> WalkForwardResult:
+    """
+    Run walk-forward validation directly on OHLCV data.
+
+    Uses Close-to-Close returns to evaluate strategy-agnostic data robustness.
+    This provides a baseline robustness check — does the data support consistent
+    returns across multiple time windows?
+
+    Args:
+        data: OHLCV DataFrame with datetime index
+        train_months: Training window size in months
+        test_months: Test window size in months
+        step_months: Step size between windows
+        min_robustness_score: Threshold for robustness
+
+    Returns:
+        WalkForwardResult with computed metrics
+    """
+    # Create windows
+    windows = create_walk_forward_windows(
+        data,
+        train_months=train_months,
+        test_months=test_months,
+        step_months=step_months,
+    )
+
+    if not windows:
+        # Not enough data for walk-forward
+        return WalkForwardResult(
+            windows=[],
+            avg_train_sharpe=0.0,
+            avg_test_sharpe=0.0,
+            avg_train_return=0.0,
+            avg_test_return=0.0,
+            sharpe_degradation=1.0,
+            return_degradation=1.0,
+            is_robust=False,
+            robustness_score=0.0,
+        )
+
+    # Get close column
+    close_col = "Close"
+    if hasattr(data.columns, "get_level_values"):
+        try:
+            data.columns = data.columns.get_level_values(0)
+        except Exception:
+            pass
+
+    if close_col not in data.columns:
+        for col in data.columns:
+            if "close" in str(col).lower():
+                close_col = col
+                break
+
+    returns = data[close_col].pct_change().dropna()
+
+    # Calculate metrics for each window
+    train_results = []
+    test_results = []
+
+    for window in windows:
+        train_mask = (returns.index >= window.train_start) & (
+            returns.index < window.train_end
+        )
+        test_mask = (returns.index >= window.test_start) & (
+            returns.index < window.test_end
+        )
+
+        train_ret = returns[train_mask]
+        test_ret = returns[test_mask]
+
+        train_results.append(calculate_performance_metrics(train_ret))
+        test_results.append(calculate_performance_metrics(test_ret))
+
+    return run_walk_forward_validation(
+        windows, train_results, test_results, min_robustness_score
+    )
+
+
 if __name__ == "__main__":
     # Test walk-forward validation
     print("Testing walk-forward validation...")
@@ -291,3 +376,4 @@ if __name__ == "__main__":
         print(f"\nWindow {i+1}:")
         print(f"  Train: {w.train_start.date()} to {w.train_end.date()}")
         print(f"  Test: {w.test_start.date()} to {w.test_end.date()}")
+

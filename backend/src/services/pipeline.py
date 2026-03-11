@@ -1,6 +1,11 @@
 """
 StrategyVault - Strategy Generation Pipeline Service
-Orchestrates: generate → fetch data → backtest → score → save.
+Orchestrates: generate → fetch data → backtest → validate → score → save.
+
+Key changes from initial version:
+- Removed _synthetic_metrics() — no more fake performance numbers
+- Integrated real walk-forward validation via quick_walk_forward()
+- Failed backtests are marked as failed, not faked
 """
 
 import os
@@ -29,8 +34,9 @@ def run_pipeline(
         1. Generate strategy code via AI (Gemini)
         2. Fetch real market data via yfinance
         3. Run backtest and parse metrics
-        4. Calculate score and assign tier
-        5. Save to database
+        4. Run walk-forward validation on the data
+        5. Calculate score and assign tier
+        6. Save to database
 
     Args:
         trading_idea: Natural language description of the strategy
@@ -67,15 +73,16 @@ def run_pipeline(
 
     # ── Step 2: Fetch real market data ─────────────────────────────
     data_path = None
+    ohlcv_df = None
     try:
-        df = fetch_ohlcv(asset, period="2y")
-        if df is not None and not df.empty:
+        ohlcv_df = fetch_ohlcv(asset, period="2y")
+        if ohlcv_df is not None and not ohlcv_df.empty:
             # Save to temp CSV for backtest executor
             tmp = tempfile.NamedTemporaryFile(
                 mode="w", suffix=".csv", delete=False, prefix="sv_data_"
             )
             # Prepare columns for backtesting.py
-            export_df = df.copy()
+            export_df = ohlcv_df.copy()
             if hasattr(export_df.columns, "get_level_values"):
                 try:
                     export_df.columns = export_df.columns.get_level_values(0)
@@ -84,7 +91,7 @@ def run_pipeline(
             export_df.index.name = "datetime"
             export_df.to_csv(tmp.name)
             data_path = tmp.name
-            status["steps"].append({"step": "data_fetch", "status": "success", "rows": len(df), "asset": asset})
+            status["steps"].append({"step": "data_fetch", "status": "success", "rows": len(ohlcv_df), "asset": asset})
         else:
             status["steps"].append({"step": "data_fetch", "status": "failed", "error": "No data returned"})
     except Exception as e:
@@ -96,6 +103,7 @@ def run_pipeline(
     max_drawdown_pct = None
     win_rate = None
     num_trades = None
+    backtest_succeeded = False
 
     if strategy_code and data_path:
         try:
@@ -113,6 +121,7 @@ def run_pipeline(
                 max_drawdown_pct = bt_result.max_drawdown_pct
                 win_rate = bt_result.win_rate
                 num_trades = bt_result.num_trades
+                backtest_succeeded = True
                 status["steps"].append({
                     "step": "backtest",
                     "status": "success",
@@ -120,28 +129,19 @@ def run_pipeline(
                     "sharpe_ratio": sharpe_ratio,
                 })
             else:
-                # Backtest failed — use synthetic metrics from the idea
                 status["steps"].append({
                     "step": "backtest",
                     "status": "failed",
                     "error": bt_result.stderr[:200] if bt_result.stderr else "Unknown error",
                 })
-                return_pct, sharpe_ratio, max_drawdown_pct, win_rate, num_trades = (
-                    _synthetic_metrics(trading_idea)
-                )
-                status["steps"].append({"step": "synthetic_metrics", "status": "applied"})
         except Exception as e:
             status["steps"].append({"step": "backtest", "status": "error", "error": str(e)})
-            return_pct, sharpe_ratio, max_drawdown_pct, win_rate, num_trades = (
-                _synthetic_metrics(trading_idea)
-            )
-            status["steps"].append({"step": "synthetic_metrics", "status": "applied"})
     else:
-        # No code or data — use synthetic metrics
-        return_pct, sharpe_ratio, max_drawdown_pct, win_rate, num_trades = (
-            _synthetic_metrics(trading_idea)
-        )
-        status["steps"].append({"step": "synthetic_metrics", "status": "applied"})
+        status["steps"].append({
+            "step": "backtest",
+            "status": "skipped",
+            "error": "No code or data available",
+        })
 
     # Clean up temp data file
     if data_path and os.path.exists(data_path):
@@ -150,22 +150,59 @@ def run_pipeline(
         except Exception:
             pass
 
-    # ── Step 4: Calculate score and tier ───────────────────────────
-    # Use sensible defaults for walk-forward (skip full validation for speed)
-    walk_forward_score = 65.0  # default mid-range
-    is_robust = bool(return_pct and return_pct > 0 and sharpe_ratio and sharpe_ratio > 0.5)
+    # ── Step 4: Walk-forward validation ────────────────────────────
+    walk_forward_score = 0.0
+    is_robust = False
+
+    if ohlcv_df is not None and not ohlcv_df.empty and len(ohlcv_df) > 180:
+        try:
+            from src.validation.walk_forward import quick_walk_forward
+
+            wf_result = quick_walk_forward(
+                ohlcv_df,
+                train_months=settings.WALK_FORWARD_WINDOW_MONTHS,
+                test_months=3,
+            )
+            walk_forward_score = float(wf_result.robustness_score * 100)  # 0-100 scale
+            is_robust = bool(wf_result.is_robust)
+            status["steps"].append({
+                "step": "walk_forward",
+                "status": "success",
+                "score": round(walk_forward_score, 1),
+                "windows": len(wf_result.windows),
+                "is_robust": is_robust,
+            })
+        except Exception as e:
+            status["steps"].append({
+                "step": "walk_forward",
+                "status": "failed",
+                "error": str(e),
+            })
+    else:
+        status["steps"].append({
+            "step": "walk_forward",
+            "status": "skipped",
+            "error": "Insufficient data for walk-forward (need >180 days)",
+        })
+
+    # ── Step 5: Calculate score and tier ───────────────────────────
+    # Use 0.5 default for consensus when swarm is not run
+    consensus_confidence = 0.5
 
     score = calculate_strategy_score(
         return_pct=return_pct or 0,
         sharpe_ratio=sharpe_ratio or 0,
         max_drawdown=max_drawdown_pct or 0,
-        consensus_confidence=0.7,  # default until swarm runs
+        consensus_confidence=consensus_confidence,
         walk_forward_score=walk_forward_score,
         is_robust=is_robust,
     )
 
-    # Assign tier
-    if score >= settings.GOLD_SCORE_THRESHOLD:
+    # Assign tier based on score AND backtest success
+    if not backtest_succeeded:
+        # Failed backtests cannot be Gold/Silver
+        tier = StrategyTier.REJECTED
+    elif score >= settings.GOLD_SCORE_THRESHOLD:
         tier = StrategyTier.GOLD
     elif score >= settings.SILVER_SCORE_THRESHOLD:
         tier = StrategyTier.SILVER
@@ -174,9 +211,15 @@ def run_pipeline(
     else:
         tier = StrategyTier.REJECTED
 
-    status["steps"].append({"step": "scoring", "status": "success", "score": score, "tier": tier.value})
+    status["steps"].append({
+        "step": "scoring",
+        "status": "success",
+        "score": score,
+        "tier": tier.value,
+        "backtest_succeeded": backtest_succeeded,
+    })
 
-    # ── Step 5: Save to database ──────────────────────────────────
+    # ── Step 6: Save to database ──────────────────────────────────
     try:
         strategy = Strategy(
             name=strategy_name,
@@ -189,8 +232,8 @@ def run_pipeline(
             num_trades=num_trades,
             walk_forward_score=walk_forward_score,
             is_robust=is_robust,
-            consensus_vote="HOLD",
-            consensus_confidence=0.7,
+            consensus_vote="PENDING" if backtest_succeeded else "REJECTED",
+            consensus_confidence=consensus_confidence,
             strategy_score=score,
             tier=tier,
             credit_cost=1,
@@ -198,8 +241,8 @@ def run_pipeline(
             assets_tested=[asset],
             model_used="gemini-2.5-flash",
             generation_prompt=trading_idea,
-            is_published=True,
-            is_featured=(score >= settings.GOLD_SCORE_THRESHOLD),
+            is_published=backtest_succeeded,  # Only publish if backtest succeeded
+            is_featured=(score >= settings.GOLD_SCORE_THRESHOLD and backtest_succeeded),
         )
         db.add(strategy)
         db.commit()
@@ -216,22 +259,3 @@ def run_pipeline(
         status["error"] = f"Failed to save: {str(e)}"
 
     return status
-
-
-def _synthetic_metrics(trading_idea: str):
-    """
-    Generate reasonable synthetic metrics based on the trading idea complexity.
-    Used as fallback when backtesting fails (e.g., missing TA-Lib).
-    """
-    import hashlib
-
-    # Use hash of idea for deterministic but varied metrics
-    h = int(hashlib.md5(trading_idea.encode()).hexdigest()[:8], 16)
-
-    return_pct = 10 + (h % 40)  # 10–50%
-    sharpe = 0.5 + (h % 200) / 100  # 0.5–2.5
-    drawdown = -(5 + (h % 25))  # -5% to -30%
-    win_rate = 40 + (h % 30)  # 40–70%
-    num_trades = 20 + (h % 80)  # 20–100
-
-    return float(return_pct), round(sharpe, 2), float(drawdown), float(win_rate), num_trades
