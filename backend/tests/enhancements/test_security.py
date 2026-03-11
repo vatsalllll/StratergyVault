@@ -7,7 +7,7 @@ import pytest
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from fastapi.testclient import TestClient
 
@@ -105,7 +105,7 @@ class TestEnvExample:
     def test_env_example_has_no_real_api_key(self):
         """Ensure .env.example has placeholder values, not real API keys."""
         env_path = os.path.join(
-            os.path.dirname(__file__), '..', '.env.example'
+            os.path.dirname(__file__), '..', '..', '.env.example'
         )
         if os.path.exists(env_path):
             with open(env_path) as f:

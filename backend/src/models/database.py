@@ -58,6 +58,13 @@ class Strategy(Base):
     equity_curve = Column(JSON)   # List of equity values from backtest
     trade_log = Column(JSON)      # List of trade records
     
+    # Advanced risk metrics
+    calmar_ratio = Column(Float)
+    var_95 = Column(Float)        # 95% Value at Risk
+    cvar_95 = Column(Float)       # 95% Conditional VaR
+    omega_ratio = Column(Float)
+    profit_factor = Column(Float)
+    
     # Validation metrics
     walk_forward_score = Column(Float)
     is_robust = Column(Boolean, default=False)
