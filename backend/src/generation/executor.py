@@ -154,6 +154,35 @@ def parse_backtest_output(stdout: str) -> Dict[str, Any]:
     return stats
 
 
+def inject_transaction_costs(code: str) -> str:
+    """
+    Inject realistic transaction costs into strategy code.
+    
+    Replaces hardcoded commission values with config-driven values.
+    Since backtesting.py doesn't have native slippage, we model
+    slippage as additional commission (a common approximation).
+    
+    Args:
+        code: Strategy Python code
+        
+    Returns:
+        Modified code with updated transaction costs
+    """
+    import re
+    from src.core.config import settings
+    
+    total_cost = settings.BACKTEST_COMMISSION + settings.BACKTEST_SLIPPAGE
+    
+    # Replace commission=X.XXX in Backtest() calls
+    code = re.sub(
+        r'commission\s*=\s*[\d.]+',
+        f'commission={total_cost}',
+        code,
+    )
+    
+    return code
+
+
 def execute_backtest(
     code: str,
     data_path: str,
@@ -192,6 +221,9 @@ def execute_backtest(
             strategy_name=strategy_name,
             data_source=os.path.basename(data_path) if data_path else "unknown"
         )
+
+    # ── Inject transaction costs from config ──────────────────────
+    code = inject_transaction_costs(code)
 
     # Replace data path placeholder in code
     code = code.replace("DATA_PATH = ", f'DATA_PATH = "{data_path}"  # ')
