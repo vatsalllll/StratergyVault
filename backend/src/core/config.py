@@ -4,8 +4,8 @@ Combines best practices from AgentQuant and Moon Dev projects
 """
 
 from pydantic_settings import BaseSettings
-from pydantic import ConfigDict
-from typing import Optional
+from pydantic import ConfigDict, field_validator
+from typing import Optional, List
 import os
 
 
@@ -32,8 +32,13 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
+    # CORS
+    CORS_ORIGINS: str = "http://localhost:3000"
+
     # Redis
     REDIS_URL: str = "redis://localhost:6379"
+    CACHE_TTL_SECONDS: int = 3600
+    CACHE_ENABLED: bool = True
 
     # Stripe (for payments)
     STRIPE_SECRET_KEY: Optional[str] = None
@@ -44,12 +49,17 @@ class Settings(BaseSettings):
     TARGET_RETURN_PERCENT: float = 50.0
     MIN_SAVE_RETURN_PERCENT: float = 1.0
     MAX_DEBUG_ITERATIONS: int = 10
+    MAX_PIPELINE_RETRIES: int = 3
     
     # Validation Settings (from AgentQuant)
     WALK_FORWARD_WINDOW_MONTHS: int = 6
     MIN_SHARPE_RATIO: float = 0.5
     MAX_DRAWDOWN_PERCENT: float = 30.0
     
+    # Transaction Cost Settings
+    BACKTEST_COMMISSION: float = 0.001
+    BACKTEST_SLIPPAGE: float = 0.0005
+
     # AI Consensus Settings (from Moon Dev Swarm)
     SWARM_MODELS: list = [
         "gemini-2.5-flash",
@@ -65,6 +75,27 @@ class Settings(BaseSettings):
     SILVER_SCORE_THRESHOLD: int = 70
     BRONZE_SCORE_THRESHOLD: int = 50
     
+    # Rate Limiting
+    RATE_LIMIT_PER_MINUTE: int = 30
+
+    # Multi-asset backtesting
+    DEFAULT_BACKTEST_ASSETS: list = ["BTC-USD", "ETH-USD", "SPY"]
+
+    @field_validator("JWT_SECRET_KEY")
+    @classmethod
+    def jwt_secret_must_be_set(cls, v):
+        if v == "change-this-in-production" and os.getenv("ENV", "development") == "production":
+            raise ValueError(
+                "JWT_SECRET_KEY must be set to a secure value in production. "
+                "Set the JWT_SECRET_KEY environment variable."
+            )
+        return v
+
+    @property
+    def cors_origins_list(self) -> List[str]:
+        """Parse CORS_ORIGINS string into a list."""
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
     model_config = ConfigDict(env_file=".env", case_sensitive=True)
 
 
