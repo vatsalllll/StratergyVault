@@ -44,3 +44,9 @@ htmlcov/
 
 # Build
 *.pyc
+
+# Source repos (large files, not tracked)
+source_repos/moon-dev-ai-agents/src/data/
+source_repos/*/data_store/
+source_repos/*/figures/
+source_repos/*/screenshots/
