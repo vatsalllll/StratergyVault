@@ -3,7 +3,7 @@
 import { useState, useEffect, use } from 'react';
 import { ScoreRing, TierBadge, MetricPill } from '../../../components/StrategyCard';
 
-const API_BASE = 'http://localhost:8000/api/v1';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 
 // ── SVG Chart Components (zero dependencies) ────────────────────
 

@@ -1,0 +1,44 @@
+# Render Blueprint — deploy with one click
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  # ── Backend (FastAPI) ──────────────────────────────────────
+  - type: web
+    name: strategyvault-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        value: sqlite:///./strategyvault.db
+      - key: REDIS_URL
+        fromService:
+          name: strategyvault-redis
+          type: redis
+          property: connectionString
+      - key: CORS_ORIGINS
+        value: https://strategyvault-web.onrender.com
+      - key: CACHE_ENABLED
+        value: "true"
+
+  # ── Frontend (Next.js) ─────────────────────────────────────
+  - type: web
+    name: strategyvault-web
+    runtime: node
+    rootDir: ./frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        value: https://strategyvault-api.onrender.com/api/v1
+      - key: PORT
+        value: "3000"
+
+  # ── Redis ──────────────────────────────────────────────────
+  - type: redis
+    name: strategyvault-redis
+    plan: free
+    maxmemoryPolicy: allkeys-lfu
