@@ -42,3 +42,4 @@ services:
     name: strategyvault-redis
     plan: free
     maxmemoryPolicy: allkeys-lfu
+    ipAllowList: []  # allow internal access only
