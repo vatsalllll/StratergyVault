@@ -19,7 +19,10 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables (root .env first, then local fallback)
+from pathlib import Path
+_root_env = Path(__file__).resolve().parents[3] / ".env"
+load_dotenv(_root_env)
 load_dotenv()
 
 

@@ -46,6 +46,8 @@ Create a complete backtesting.py strategy based on the following idea:
 TRADING IDEA:
 {trading_idea}
 
+{market_context}
+
 REQUIREMENTS:
 1. Use the backtesting.py library
 2. Include all necessary imports (backtesting, talib, pandas, numpy)
@@ -61,6 +63,7 @@ CRITICAL RULES:
 4. No plotting - only print stats
 5. Include data loading that works with this CSV format:
    datetime, open, high, low, close, volume
+6. DO NOT import from backtesting.lib — implement crossover() manually if needed
 
 INDICATOR EXAMPLES:
 - SMA: self.sma = self.I(talib.SMA, self.data.Close, timeperiod=20)
@@ -77,6 +80,8 @@ data = data.rename(columns={{'open': 'Open', 'high': 'High', 'low': 'Low', 'clos
 data['datetime'] = pd.to_datetime(data['datetime'])
 data = data.set_index('datetime')
 ```
+
+{reference_strategies}
 
 OUTPUT FORMAT:
 First, provide a STRATEGY_NAME (two words, unique):
@@ -154,7 +159,11 @@ class StrategyGenerator:
         Args:
             model: AI model to use for generation
         """
-        load_dotenv()
+        from pathlib import Path
+        # Load root .env first, then local .env as fallback
+        root_env = Path(__file__).resolve().parents[3] / ".env"
+        load_dotenv(root_env)
+        load_dotenv()  # also check backend/.env
         self.model = model
         self._setup_model()
     
@@ -169,17 +178,64 @@ class StrategyGenerator:
             self.client = genai.GenerativeModel(self.model.value)
         # Add support for other models as needed
     
-    def generate_strategy(self, trading_idea: str) -> GeneratedStrategy:
+    def generate_strategy(self, trading_idea: str, ohlcv_df=None) -> GeneratedStrategy:
         """
         Generate a trading strategy from a natural language idea.
         
+        Injects:
+          - Market feature context from AgentQuant feature engine (if ohlcv_df provided)
+          - Harvard strategy templates as reference examples
+        
         Args:
             trading_idea: Natural language description of the trading strategy
+            ohlcv_df: Optional OHLCV DataFrame to compute live market features
             
         Returns:
             GeneratedStrategy with name, code, and metadata
         """
-        prompt = STRATEGY_GENERATION_PROMPT.format(trading_idea=trading_idea)
+        # ── Inject market feature context (AgentQuant) ──
+        market_context = ""
+        if ohlcv_df is not None:
+            try:
+                from src.features.feature_engine import compute_features_for_strategy
+                features = compute_features_for_strategy(ohlcv_df)
+                if features:
+                    market_context = (
+                        "CURRENT MARKET CONDITIONS (use these to tune your parameters):\n"
+                        f"  Volatility (21d): {features.get('volatility_21d', 'N/A')}\n"
+                        f"  Volatility (63d): {features.get('volatility_63d', 'N/A')}\n"
+                        f"  Momentum (21d): {features.get('momentum_21d', 'N/A')}\n"
+                        f"  Momentum (63d): {features.get('momentum_63d', 'N/A')}\n"
+                        f"  RSI (14): {features.get('rsi_14', 'N/A')}\n"
+                        f"  BB Width: {features.get('bb_width', 'N/A')}\n"
+                        f"  Price vs SMA63: {features.get('price_vs_sma63', 'N/A')}\n"
+                    )
+            except Exception:
+                pass  # Feature engine is optional
+
+        # ── Inject Harvard strategy templates as reference ──
+        reference_strategies = ""
+        try:
+            from src.features.strategy_templates import STRATEGY_TEMPLATES
+            # Pick the most relevant template (BB Squeeze is the most complete)
+            tmpl = STRATEGY_TEMPLATES.get("bb_squeeze_adx", {})
+            if tmpl:
+                reference_strategies = (
+                    "REFERENCE STRATEGY (use as structural example — adapt the logic to match the trading idea):\n"
+                    f"Strategy: {tmpl['name']}\n"
+                    f"Description: {tmpl['description']}\n"
+                    "```python\n"
+                    f"{tmpl['code'][:1500]}\n"  # Truncate to avoid prompt bloat
+                    "```\n"
+                )
+        except Exception:
+            pass  # Templates are optional
+
+        prompt = STRATEGY_GENERATION_PROMPT.format(
+            trading_idea=trading_idea,
+            market_context=market_context,
+            reference_strategies=reference_strategies,
+        )
         
         response = self.client.generate_content(prompt)
         raw_text = response.text

@@ -53,25 +53,7 @@ def run_pipeline(
         "error": None,
     }
 
-    # ── Step 1: Generate strategy code via AI ──────────────────────
-    strategy_name = "GeneratedStrategy"
-    strategy_code = None
-
-    try:
-        from src.generation.generator import StrategyGenerator, AIModel
-
-        generator = StrategyGenerator(AIModel.GEMINI_FLASH)
-        result = generator.generate_strategy(trading_idea)
-        strategy_name = result.name
-        strategy_code = result.code
-        status["steps"].append({"step": "generation", "status": "success", "name": strategy_name})
-    except Exception as e:
-        # Fall back to template if AI generation fails
-        status["steps"].append({"step": "generation", "status": "fallback", "error": str(e)})
-        from src.generation.generator import generate_backtest_template
-        strategy_code = generate_backtest_template(strategy_name)
-
-    # ── Step 2: Fetch real market data ─────────────────────────────
+    # ── Step 1: Fetch real market data (needed for feature context) ──
     data_path = None
     ohlcv_df = None
     try:
@@ -96,6 +78,24 @@ def run_pipeline(
             status["steps"].append({"step": "data_fetch", "status": "failed", "error": "No data returned"})
     except Exception as e:
         status["steps"].append({"step": "data_fetch", "status": "failed", "error": str(e)})
+
+    # ── Step 2: Generate strategy code via AI ──────────────────────
+    strategy_name = "GeneratedStrategy"
+    strategy_code = None
+
+    try:
+        from src.generation.generator import StrategyGenerator, AIModel
+
+        generator = StrategyGenerator(AIModel.GEMINI_FLASH)
+        result = generator.generate_strategy(trading_idea, ohlcv_df=ohlcv_df)
+        strategy_name = result.name
+        strategy_code = result.code
+        status["steps"].append({"step": "generation", "status": "success", "name": strategy_name})
+    except Exception as e:
+        # Fall back to template if AI generation fails
+        status["steps"].append({"step": "generation", "status": "fallback", "error": str(e)})
+        from src.generation.generator import generate_backtest_template
+        strategy_code = generate_backtest_template(strategy_name)
 
     # ── Step 3: RBI Debug Loop — backtest with iterative debugging ──
     return_pct = None
@@ -229,10 +229,49 @@ def run_pipeline(
             "error": "Insufficient data for walk-forward (need >180 days)",
         })
 
-    # ── Step 5: Calculate score and tier ───────────────────────────
-    # Use 0.5 default for consensus when swarm is not run
+    # ── Step 5: Swarm AI consensus (Moon Dev pattern) ─────────────
     consensus_confidence = 0.5
+    consensus_vote = "PENDING"
 
+    if backtest_succeeded:
+        try:
+            from src.rating.swarm import SwarmAgent
+            swarm = SwarmAgent()
+            if swarm.clients:  # Only run if at least one API key is configured
+                consensus = swarm.rate_strategy(
+                    strategy_details=trading_idea,
+                    return_pct=return_pct or 0,
+                    sharpe_ratio=sharpe_ratio or 0,
+                    max_drawdown=max_drawdown_pct or 0,
+                    win_rate=win_rate or 0,
+                    num_trades=num_trades or 0,
+                    walk_forward_score=walk_forward_score,
+                    is_robust=is_robust,
+                )
+                consensus_confidence = consensus.consensus_confidence
+                consensus_vote = consensus.consensus_vote
+                status["steps"].append({
+                    "step": "swarm_consensus",
+                    "status": "success",
+                    "vote": consensus_vote,
+                    "confidence": consensus_confidence,
+                    "models_used": consensus.successful_models,
+                    "breakdown": consensus.vote_breakdown,
+                })
+            else:
+                status["steps"].append({
+                    "step": "swarm_consensus",
+                    "status": "skipped",
+                    "reason": "No AI API keys configured for consensus",
+                })
+        except Exception as e:
+            status["steps"].append({
+                "step": "swarm_consensus",
+                "status": "failed",
+                "error": str(e)[:200],
+            })
+
+    # ── Step 6: Calculate score and tier ───────────────────────────
     score = calculate_strategy_score(
         return_pct=return_pct or 0,
         sharpe_ratio=sharpe_ratio or 0,
@@ -277,7 +316,7 @@ def run_pipeline(
             equity_curve=equity_curve_data,
             walk_forward_score=walk_forward_score,
             is_robust=is_robust,
-            consensus_vote="PENDING" if backtest_succeeded else "REJECTED",
+            consensus_vote=consensus_vote if backtest_succeeded else "REJECTED",
             consensus_confidence=consensus_confidence,
             strategy_score=score,
             tier=tier,

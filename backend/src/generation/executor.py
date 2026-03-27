@@ -188,7 +188,7 @@ def execute_backtest(
     data_path: str,
     strategy_name: str = "Strategy",
     timeout: int = 300,
-    python_path: str = "python"
+    python_path: str = None
 ) -> BacktestResult:
     """
     Execute a backtest strategy and capture results.
@@ -198,11 +198,14 @@ def execute_backtest(
         data_path: Path to CSV data file
         strategy_name: Name of the strategy
         timeout: Execution timeout in seconds
-        python_path: Path to Python interpreter
+        python_path: Path to Python interpreter (defaults to sys.executable)
         
     Returns:
         BacktestResult with execution results
     """
+    import sys
+    if python_path is None:
+        python_path = sys.executable
     # ── Sanitize code before execution ──────────────────────────────
     is_safe, error_msg = sanitize_code(code)
     if not is_safe:
